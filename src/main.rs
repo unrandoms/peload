@@ -1,3 +1,10 @@
+/*
+Author: iss4cf0ng/ISSAC
+GitHub: https://github.com/iss4cf0ng/IronPE
+Description:
+    This project is a proof of concept of PE loader written in Rust.
+*/
+
 use std::env;
 use std::fs;
 use std::str;
