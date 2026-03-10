@@ -12,12 +12,13 @@ This project is a **Rust reimplementation** of my previous project **[dotNetPELo
 
 The goal of IronPE is to explore how Windows loads Portable Executables internally and to demonstrate how this process can be implemented in Rust.
 
-If you find this project useful or informative, a ⭐ would be appreciated!
+<p align="center">
+  <img src="https://iss4cf0ng.github.io/images/meme/natsu_cake.jpg" width="200">
+  <br>
+  Waaaahhhhhhh!
+</p>
 
-<figure style="text-align: center;">
-    <img src="https://iss4cf0ng.github.io/images/meme/natsu_cake.jpg" width="200" alt="Natsu Cake">
-    <figcaption>Waaaahhhhhhh!</figcaption>
-</figure>
+<p align="center">If you find this project useful or informative, a ⭐ would be appreciated!</p>
 
 ## Disclaimer
 
