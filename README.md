@@ -60,7 +60,6 @@ The purpose of this project is **educational**, to better understand:
 
 ## How It Works
 IronPE performs the following steps to execute a PE file from memory:
-IronPE performs the following steps to execute a PE file from memory:
 
 1. Read PE file into memory
 2. Parse PE headers
