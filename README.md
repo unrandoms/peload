@@ -5,7 +5,6 @@ Rust PE Loader / Manual Mapping Implementation
 ![status](https://img.shields.io/badge/status-production-red)
 ![language](https://img.shields.io/badge/language-Rust-orange)
 ![license](https://img.shields.io/badge/license-MIT-green)
-![Downloads](https://img.shields.io/github/downloads/iss4cf0ng/IronPE/total)
 ![Release](https://img.shields.io/github/v/release/iss4cf0ng/IronPE)
 
 **IronPE** is a minimal Windows PE manual loader written in Rust for both x86 and x64 PE files.
