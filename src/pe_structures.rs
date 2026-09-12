@@ -5,7 +5,7 @@
 
 #![allow(non_snake_case, dead_code)]
 
-use std::{fmt, u64};
+use std::fmt;
 
 
 //DOS Header (COFF/PE Header)
@@ -207,10 +207,52 @@ pub struct IMAGE_IMPORT_DESCRIPTOR {
     pub first_thunk         : u32,   //RVA to IAT (runtime address table)
 }
 
+//TLS Directory (32-bit)
+//IMAGE_TLS_DIRECTORY32 — data directory index 9 (IMAGE_DIRECTORY_ENTRY_TLS)
+#[repr(C, packed)]
+#[derive(Clone, Copy, Default)]
+pub struct IMAGE_TLS_DIRECTORY32 {
+    pub start_address_of_raw_data: u32,   //VA of TLS raw data start
+    pub end_address_of_raw_data  : u32,   //VA of TLS raw data end
+    pub address_of_index         : u32,   //VA of TLS index DWORD
+    pub address_of_callbacks     : u32,   //VA of null-terminated PIMAGE_TLS_CALLBACK array
+    pub size_of_zero_fill        : u32,   //Bytes to zero-fill beyond raw data
+    pub characteristics          : u32,   //Alignment and flags
+}
+
+//TLS Directory (64-bit)
+//IMAGE_TLS_DIRECTORY64 — data directory index 9 (IMAGE_DIRECTORY_ENTRY_TLS)
+#[repr(C, packed)]
+#[derive(Clone, Copy, Default)]
+pub struct IMAGE_TLS_DIRECTORY64 {
+    pub start_address_of_raw_data: u64,   //VA of TLS raw data start
+    pub end_address_of_raw_data  : u64,   //VA of TLS raw data end
+    pub address_of_index         : u64,   //VA of TLS index DWORD
+    pub address_of_callbacks     : u64,   //VA of null-terminated PIMAGE_TLS_CALLBACK array
+    pub size_of_zero_fill        : u32,   //Bytes to zero-fill beyond raw data
+    pub characteristics          : u32,   //Alignment and flags
+}
+
+//Exception directory entry (x64 only)
+//IMAGE_RUNTIME_FUNCTION_ENTRY used by RtlAddFunctionTable for SEH unwind support
+#[repr(C, packed)]
+#[derive(Clone, Copy, Default)]
+pub struct IMAGE_RUNTIME_FUNCTION_ENTRY {
+    pub begin_address     : u32,   //RVA of function start
+    pub end_address       : u32,   //RVA of function end (exclusive)
+    pub unwind_info_address: u32,  //RVA of UNWIND_INFO structure
+}
+
+//TLS callback function pointer type: fn(image_base, reason, reserved)
+pub type TlsCallback = unsafe extern "system" fn(*mut std::ffi::c_void, u32, *mut std::ffi::c_void);
+
+//DLL_PROCESS_ATTACH reason code passed to TLS callbacks
+pub const DLL_PROCESS_ATTACH: u32 = 1;
+
 //Helper functions
 pub unsafe fn read_struct<T: Copy>(data: *const u8, offset: usize) -> T {
     let ptr = data.add(offset) as *const T;
-    return std::ptr::read_unaligned(ptr);
+    std::ptr::read_unaligned(ptr)
 }
 
 pub unsafe fn read_ansi_string(ptr: *const u8) -> String {
@@ -221,5 +263,5 @@ pub unsafe fn read_ansi_string(ptr: *const u8) -> String {
         len += 1;
     }
 
-    return String::from_utf8_lossy(std::slice::from_raw_parts(ptr, len)).to_string();
+    String::from_utf8_lossy(std::slice::from_raw_parts(ptr, len)).to_string()
 }
