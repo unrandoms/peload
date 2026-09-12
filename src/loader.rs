@@ -1,7 +1,7 @@
 //loader.rs
 //PE loading logic for x86 and x64
-//Author: iss4cf0ng/ISSAC
-//GitHub: https://github.com/iss4cf0ng/IronPE
+//Author: iss4cf0ng/ISSAC (extended by peload fork)
+//GitHub: https://github.com/unrandoms/peload
 
 use std::ffi::CString;
 use windows::{
@@ -12,15 +12,18 @@ use windows::{
             Memory::{MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READWRITE, VirtualAlloc},
             Threading::{CreateThread, INFINITE, WaitForSingleObject},
         },
-    }, core::PCSTR
+    },
+    core::PCSTR,
 };
 
 #[allow(unused_imports)]
 use crate::logger::{log_error, log_info, log_ok};
 use crate::pe_structures::*;
+use crate::error::LoadError;
 
 //x86 PE loader
 
+#[allow(dead_code)]
 pub struct X86PeLoader {
     pub raw_bytes: Vec<u8>, //file bytes
     pub dos_header: IMAGE_DOS_HEADER,
@@ -30,19 +33,19 @@ pub struct X86PeLoader {
 }
 
 impl X86PeLoader {
-    pub fn new(bytes: Vec<u8>) -> Result<Self, String> {
+    pub fn new(bytes: Vec<u8>) -> Result<Self, LoadError> {
         unsafe {
             let data = bytes.as_ptr();
             let dos: IMAGE_DOS_HEADER = read_struct(data, 0);
             if dos.e_magic != 0x5A4D {
-                return Err("Invalid DOS signature (not MZ)".to_string());
+                return Err(LoadError::InvalidPeHeader("invalid DOS signature (not MZ)".to_string()));
             }
 
             let nt_offset = dos.e_lfanew as usize;
             let file_hdr: IMAGE_FILE_HEADER = read_struct(data, nt_offset + 4);
             let opt_hdr: IMAGE_OPTIONAL_HEADER32 = read_struct(data, nt_offset + 4 + std::mem::size_of::<IMAGE_FILE_HEADER>());
             let sections_offset = nt_offset + 4 + std::mem::size_of::<IMAGE_FILE_HEADER>() + std::mem::size_of::<IMAGE_OPTIONAL_HEADER32>();
-            
+
             let mut sections = Vec::new();
             for i in 0..file_hdr.number_of_sections as usize {
                 let sec: IMAGE_SECTION_HEADER = read_struct(data, sections_offset + i * std::mem::size_of::<IMAGE_SECTION_HEADER>());
@@ -60,23 +63,23 @@ impl X86PeLoader {
     }
 
     pub fn is_32bit(&self) -> bool {
-        return self.optional_header.magic == 0x010B; //PE32
+        self.optional_header.magic == 0x010B //PE32
     }
 }
 
-pub fn load_x86(pe: &X86PeLoader) -> Result<(), String> {
+pub fn load_x86(pe: &X86PeLoader) -> Result<(), LoadError> {
     unsafe {
         //Memory allocation
         let opt = &pe.optional_header;
         let image_base = VirtualAlloc(
             None,
-            opt.size_of_image as usize, 
-            MEM_COMMIT | MEM_RESERVE, 
-            PAGE_EXECUTE_READWRITE, 
+            opt.size_of_image as usize,
+            MEM_COMMIT | MEM_RESERVE,
+            PAGE_EXECUTE_READWRITE,
         );
 
         if image_base.is_null() {
-            return Err("VirtualAlloc() failed".to_string());
+            return Err(LoadError::AllocationFailed("VirtualAlloc() failed for image".to_string()));
         }
 
         let size_of_image = opt.size_of_image;
@@ -91,8 +94,11 @@ pub fn load_x86(pe: &X86PeLoader) -> Result<(), String> {
         //Copy sections
         for sec in &pe.sections {
             let dest = base.add(sec.virtual_address as usize);
-            std::ptr::copy_nonoverlapping(raw.add(sec.pointer_to_raw_data as usize), dest, sec.size_of_raw_data as usize);
-
+            std::ptr::copy_nonoverlapping(
+                raw.add(sec.pointer_to_raw_data as usize),
+                dest,
+                sec.size_of_raw_data as usize,
+            );
             log_info(&format!("Section {:>8} copied to {:#X}", sec.name_str(), dest as usize));
         }
 
@@ -101,7 +107,7 @@ pub fn load_x86(pe: &X86PeLoader) -> Result<(), String> {
         if delta != 0 {
             let reloc_dir = &opt.base_relocation_table;
             if reloc_dir.size == 0 {
-                return Err("Relocation table size is zero".to_string());
+                return Err(LoadError::RelocationFailed("relocation table size is zero but delta is non-zero".to_string()));
             }
 
             let reloc_base = base.add(reloc_dir.virtual_address as usize);
@@ -117,15 +123,15 @@ pub fn load_x86(pe: &X86PeLoader) -> Result<(), String> {
                 let fixup_base = base.add(block.virtual_address as usize);
 
                 for i in 0..count {
-                    let value = std::ptr::read_unaligned(reloc_base.add(offset + 8 + i * 2) as *const u16, );
-
+                    let value = std::ptr::read_unaligned(
+                        reloc_base.add(offset + 8 + i * 2) as *const u16,
+                    );
                     let reloc_type = value >> 12;
                     let rva = (value & 0xFFF) as usize;
 
                     if reloc_type == 0x3 {
                         let patch = fixup_base.add(rva) as *mut i32;
                         let original = std::ptr::read_unaligned(patch);
-
                         std::ptr::write_unaligned(patch, original + delta as i32);
                     }
                 }
@@ -137,7 +143,7 @@ pub fn load_x86(pe: &X86PeLoader) -> Result<(), String> {
         //Import libraries
         let import_dir = &opt.import_table;
         if import_dir.size == 0 {
-            return Err("Import table size is zero".to_string());
+            return Err(LoadError::IatResolutionFailed("import table size is zero".to_string()));
         }
 
         let desc_size = std::mem::size_of::<IMAGE_IMPORT_DESCRIPTOR>();
@@ -153,8 +159,10 @@ pub fn load_x86(pe: &X86PeLoader) -> Result<(), String> {
             let dll_name = read_ansi_string(ptr_dll_name);
             log_info(&format!("DLL: {}", dll_name));
 
-            let dll_cstr = CString::new(dll_name.clone()).map_err(|e| e.to_string())?;
-            let h_dll = LoadLibraryA(PCSTR(dll_cstr.as_ptr() as *const u8)).map_err(|e| format!("LoadLibrary({}) failed: {}", dll_name, e))?;
+            let dll_cstr = CString::new(dll_name.clone())
+                .map_err(|e| LoadError::IatResolutionFailed(e.to_string()))?;
+            let h_dll = LoadLibraryA(PCSTR(dll_cstr.as_ptr() as *const u8))
+                .map_err(|e| LoadError::IatResolutionFailed(format!("LoadLibrary({}) failed: {}", dll_name, e)))?;
 
             let mut thunk_ref = base.add(if desc.original_first_thunk != 0 {
                 desc.original_first_thunk as usize
@@ -171,15 +179,14 @@ pub fn load_x86(pe: &X86PeLoader) -> Result<(), String> {
 
                 let func_addr = if (thunk_data & 0x80000000) != 0 {
                     //Import by ordinal
-                    let oridinal = (thunk_data & 0xFFFF) as usize;
-                    
-                    GetProcAddress(h_dll, PCSTR(oridinal as *const u8))
+                    let ordinal = (thunk_data & 0xFFFF) as usize;
+                    GetProcAddress(h_dll, PCSTR(ordinal as *const u8))
                 } else {
                     //Import by name
-                    let pName = base.add(thunk_data as usize + 2);
-                    let func_name = read_ansi_string(pName);
-                    let func_cstr = CString::new(func_name).map_err(|e| e.to_string())?;
-
+                    let p_name = base.add(thunk_data as usize + 2);
+                    let func_name = read_ansi_string(p_name);
+                    let func_cstr = CString::new(func_name)
+                        .map_err(|e| LoadError::IatResolutionFailed(e.to_string()))?;
                     GetProcAddress(h_dll, PCSTR(func_cstr.as_ptr() as *const u8))
                 };
 
@@ -194,26 +201,68 @@ pub fn load_x86(pe: &X86PeLoader) -> Result<(), String> {
             desc_ptr = (desc_ptr as *const u8).add(desc_size) as *const IMAGE_IMPORT_DESCRIPTOR;
         }
 
+        //TLS callbacks (invoked after relocation and IAT resolution, before entry point)
+        invoke_tls_callbacks_x86(base, opt)?;
+
         //Go to OEP
+        if opt.address_of_entry_point == 0 {
+            return Err(LoadError::EntryPointInvalid);
+        }
         log_ok("Jump to OEP");
         let entry = base.add(opt.address_of_entry_point as usize);
-        let hThread = CreateThread(
-            None, 
-            0, 
-            Some(std::mem::transmute(entry as *const())), 
-            None, 
-            Default::default(), 
-        None,
+        let h_thread = CreateThread(
+            None,
+            0,
+            Some(std::mem::transmute::<*const (), unsafe extern "system" fn(*mut std::ffi::c_void) -> u32>(entry as *const ())),
+            None,
+            Default::default(),
+            None,
         )
-        .map_err(|e| format!("CreateThread failed: {}", e))?;
+        .map_err(|e| LoadError::WindowsApiError(format!("CreateThread failed: {}", e)))?;
 
-        WaitForSingleObject(HANDLE(hThread.0), INFINITE);
+        WaitForSingleObject(HANDLE(h_thread.0), INFINITE);
         Ok(())
     }
 }
 
+/// Walk the TLS directory for a 32-bit image and call each callback with DLL_PROCESS_ATTACH.
+/// Skips gracefully when the TLS data directory is absent (virtual_address == 0).
+unsafe fn invoke_tls_callbacks_x86(base: *mut u8, opt: &IMAGE_OPTIONAL_HEADER32) -> Result<(), LoadError> {
+    let tls_va = opt.tls_table.virtual_address;
+    if tls_va == 0 {
+        return Ok(());
+    }
+
+    let tls: IMAGE_TLS_DIRECTORY32 = read_struct(base, tls_va as usize);
+    let callbacks_va = tls.address_of_callbacks;
+    if callbacks_va == 0 {
+        return Ok(());
+    }
+
+    //address_of_callbacks is an absolute VA; convert to a pointer into the mapped image.
+    //The image was loaded at `base` and the preferred base is opt.image_base.
+    let delta = base as i64 - opt.image_base as i64;
+    let cb_ptr = (callbacks_va as i64 + delta) as *const u32;
+
+    let mut i = 0usize;
+    loop {
+        let cb_rva = std::ptr::read_unaligned(cb_ptr.add(i));
+        if cb_rva == 0 {
+            break;
+        }
+        let cb_va = (cb_rva as i64 + delta) as *const ();
+        let callback: TlsCallback = std::mem::transmute(cb_va);
+        log_info(&format!("Invoking TLS callback[{}] at {:#X}", i, cb_va as usize));
+        callback(base as *mut std::ffi::c_void, DLL_PROCESS_ATTACH, std::ptr::null_mut());
+        i += 1;
+    }
+
+    Ok(())
+}
+
 //x64 PE loader
 
+#[allow(dead_code)]
 pub struct X64PeLoader {
     pub raw_bytes: Vec<u8>,
     pub dos_header: IMAGE_DOS_HEADER,
@@ -224,13 +273,13 @@ pub struct X64PeLoader {
 }
 
 impl X64PeLoader {
-    pub fn new(bytes: Vec<u8>) -> Result<Self, String> {
+    pub fn new(bytes: Vec<u8>) -> Result<Self, LoadError> {
         unsafe {
             let data = bytes.as_ptr();
 
             let dos: IMAGE_DOS_HEADER = read_struct(data, 0);
             if dos.e_magic != 0x5A4D {
-                return Err("Invalid DOS signature (not MZ)".to_string())
+                return Err(LoadError::InvalidPeHeader("invalid DOS signature (not MZ)".to_string()));
             }
 
             let nt_offset = dos.e_lfanew as usize;
@@ -258,10 +307,12 @@ impl X64PeLoader {
 
             let mut sections = Vec::new();
             for i in 0..file_hdr.number_of_sections as usize {
-                let sec: IMAGE_SECTION_HEADER = read_struct(data, sections_offset + i * std::mem::size_of::<IMAGE_SECTION_HEADER>());
+                let sec: IMAGE_SECTION_HEADER = read_struct(
+                    data,
+                    sections_offset + i * std::mem::size_of::<IMAGE_SECTION_HEADER>(),
+                );
                 sections.push(sec);
             }
-
 
             Ok(Self {
                 raw_bytes: bytes,
@@ -275,25 +326,25 @@ impl X64PeLoader {
     }
 
     pub fn is_32bit_header(&self) -> bool {
-        return (self.file_header.characteristics & IMAGE_FILE_32BIT_MACHINE) != 0;
+        (self.file_header.characteristics & IMAGE_FILE_32BIT_MACHINE) != 0
     }
 }
 
-pub fn load_x64(pe: &X64PeLoader) -> Result<(), String> {
+pub fn load_x64(pe: &X64PeLoader) -> Result<(), LoadError> {
     unsafe {
         let opt = &pe.optional_header64;
         let raw = pe.raw_bytes.as_ptr();
 
         //Memory allocation
         let codebase = VirtualAlloc(
-            None, 
-            opt.size_of_image as usize, 
-            MEM_COMMIT | MEM_RESERVE, 
+            None,
+            opt.size_of_image as usize,
+            MEM_COMMIT | MEM_RESERVE,
             PAGE_EXECUTE_READWRITE,
         );
 
         if codebase.is_null() {
-            return Err("VirtualAlloc() failed".to_string());
+            return Err(LoadError::AllocationFailed("VirtualAlloc() failed for image".to_string()));
         }
 
         let base = codebase as *mut u8;
@@ -304,13 +355,24 @@ pub fn load_x64(pe: &X64PeLoader) -> Result<(), String> {
         log_info("Copying sections");
         for sec in &pe.sections {
             let dest = VirtualAlloc(
-                Some(base.add(sec.virtual_address as usize) as *mut _), 
-                sec.size_of_raw_data as usize, 
-                MEM_COMMIT, 
+                Some(base.add(sec.virtual_address as usize) as *mut _),
+                sec.size_of_raw_data as usize,
+                MEM_COMMIT,
                 PAGE_EXECUTE_READWRITE,
             );
 
-            std::ptr::copy_nonoverlapping(raw.add(sec.pointer_to_raw_data as usize), dest as *mut u8, sec.size_of_raw_data as usize, );
+            if dest.is_null() {
+                return Err(LoadError::SectionMappingFailed(format!(
+                    "VirtualAlloc failed for section {}",
+                    sec.name_str()
+                )));
+            }
+
+            std::ptr::copy_nonoverlapping(
+                raw.add(sec.pointer_to_raw_data as usize),
+                dest as *mut u8,
+                sec.size_of_raw_data as usize,
+            );
 
             log_info(&format!("Section {:>8} copied to {:#X}", sec.name_str(), dest as usize));
         }
@@ -341,7 +403,9 @@ pub fn load_x64(pe: &X64PeLoader) -> Result<(), String> {
             log_info(&format!("Relocation block: {} entries", entry_count));
 
             for i in 0..entry_count {
-                let value = std::ptr::read_unaligned(reloc_table.add(current_offset + base_reloc_size + i * 2) as * const u16, );
+                let value = std::ptr::read_unaligned(
+                    reloc_table.add(current_offset + base_reloc_size + i * 2) as *const u16,
+                );
                 let reloc_type = value >> 12;
                 let fixup = (value & 0xFFF) as usize;
 
@@ -350,10 +414,8 @@ pub fn load_x64(pe: &X64PeLoader) -> Result<(), String> {
                     0xA => {
                         let patch = dest.add(fixup) as *mut i64;
                         let original = std::ptr::read_unaligned(patch);
-
                         std::ptr::write_unaligned(patch, original + delta);
                     }
-
                     _ => {}
                 }
             }
@@ -376,8 +438,10 @@ pub fn load_x64(pe: &X64PeLoader) -> Result<(), String> {
             let dll_name = read_ansi_string(base.add(desc.name as usize));
             log_info(&format!("DLL: {}", dll_name));
 
-            let dll_cstr = CString::new(dll_name.clone()).map_err(|e| e.to_string())?;
-            let h_dll = LoadLibraryA(PCSTR(dll_cstr.as_ptr() as *const u8)).map_err(|e| format!("LoadLibrary({}) failed: {}", dll_name, e))?;
+            let dll_cstr = CString::new(dll_name.clone())
+                .map_err(|e| LoadError::IatResolutionFailed(e.to_string()))?;
+            let h_dll = LoadLibraryA(PCSTR(dll_cstr.as_ptr() as *const u8))
+                .map_err(|e| LoadError::IatResolutionFailed(format!("LoadLibrary({}) failed: {}", dll_name, e)))?;
 
             let int_rva = if desc.original_first_thunk != 0 {
                 desc.original_first_thunk as usize
@@ -401,7 +465,8 @@ pub fn load_x64(pe: &X64PeLoader) -> Result<(), String> {
                     //Name import
                     let name_ptr = base.add((thunk & 0x7FFF_FFFF_FFFF) as usize + 2);
                     let func_name = read_ansi_string(name_ptr);
-                    let func_cstr = CString::new(func_name).map_err(|e| e.to_string())?;
+                    let func_cstr = CString::new(func_name)
+                        .map_err(|e| LoadError::IatResolutionFailed(e.to_string()))?;
                     GetProcAddress(h_dll, PCSTR(func_cstr.as_ptr() as *const u8))
                 };
 
@@ -416,21 +481,113 @@ pub fn load_x64(pe: &X64PeLoader) -> Result<(), String> {
             j += 1;
         }
 
+        //Register exception directory for x64 SEH/C++ exception unwinding
+        #[cfg(target_arch = "x86_64")]
+        register_exception_directory(base, opt)?;
+
+        //TLS callbacks (invoked after relocation and IAT resolution, before entry point)
+        invoke_tls_callbacks_x64(base, opt)?;
+
         //Go to OEP
+        if opt.address_of_entry_point == 0 {
+            return Err(LoadError::EntryPointInvalid);
+        }
         log_ok("Jump to OEP");
         let entry = base.add(opt.address_of_entry_point as usize);
 
         let h_thread = CreateThread(
             None,
             0,
-            Some(std::mem::transmute(entry as *const ())),
+            Some(std::mem::transmute::<*const (), unsafe extern "system" fn(*mut std::ffi::c_void) -> u32>(entry as *const ())),
             None,
             Default::default(),
             None,
         )
-        .map_err(|e| format!("CreateThread failed: {}", e))?;
+        .map_err(|e| LoadError::WindowsApiError(format!("CreateThread failed: {}", e)))?;
 
         WaitForSingleObject(HANDLE(h_thread.0), INFINITE);
         Ok(())
     }
+}
+
+/// Register the exception directory (IMAGE_DIRECTORY_ENTRY_EXCEPTION) with the OS runtime.
+/// Required on x64 so that SEH and C++ exceptions in the loaded PE can unwind correctly.
+/// Without this call, any exception thrown inside the mapped image crashes the process
+/// because RtlLookupFunctionEntry cannot find the UNWIND_INFO for frames inside the image.
+/// Compiled only for x86_64; omitted entirely on x86 where frame-based unwinding is used.
+#[cfg(target_arch = "x86_64")]
+unsafe fn register_exception_directory(
+    base: *mut u8,
+    opt: &IMAGE_OPTIONAL_HEADER64,
+) -> Result<(), LoadError> {
+    use windows::Win32::System::Diagnostics::Debug::RtlAddFunctionTable;
+
+    let exc_va = opt.exception_table.virtual_address;
+    let exc_size = opt.exception_table.size;
+
+    if exc_va == 0 || exc_size == 0 {
+        log_info("No exception directory; skipping RtlAddFunctionTable");
+        return Ok(());
+    }
+
+    //windows-rs IMAGE_RUNTIME_FUNCTION_ENTRY is the same layout as our struct:
+    //BeginAddress: u32, EndAddress: u32, UnwindInfoAddress: u32 (in anonymous union)
+    let entry_size = std::mem::size_of::<windows::Win32::System::Diagnostics::Debug::IMAGE_RUNTIME_FUNCTION_ENTRY>();
+    let entry_count = exc_size as usize / entry_size;
+    let pfunction_table = base.add(exc_va as usize)
+        as *const windows::Win32::System::Diagnostics::Debug::IMAGE_RUNTIME_FUNCTION_ENTRY;
+
+    log_info(&format!(
+        "Registering {} RUNTIME_FUNCTION entries via RtlAddFunctionTable",
+        entry_count
+    ));
+
+    //windows-rs 0.56 exposes: RtlAddFunctionTable(functiontable: &[IMAGE_RUNTIME_FUNCTION_ENTRY], baseaddress: u64)
+    let runtime_funcs = std::slice::from_raw_parts(pfunction_table, entry_count);
+    let result = RtlAddFunctionTable(runtime_funcs, base as u64);
+
+    if result.as_bool() {
+        log_ok("RtlAddFunctionTable succeeded");
+        Ok(())
+    } else {
+        Err(LoadError::WindowsApiError(
+            "RtlAddFunctionTable returned FALSE; SEH unwind table not registered".to_string(),
+        ))
+    }
+}
+
+/// Walk the TLS directory for a 64-bit image and call each callback with DLL_PROCESS_ATTACH.
+/// Skips gracefully when the TLS data directory is absent (virtual_address == 0).
+unsafe fn invoke_tls_callbacks_x64(base: *mut u8, opt: &IMAGE_OPTIONAL_HEADER64) -> Result<(), LoadError> {
+    let tls_va = opt.tls_table.virtual_address;
+    if tls_va == 0 {
+        return Ok(());
+    }
+
+    let tls: IMAGE_TLS_DIRECTORY64 = read_struct(base, tls_va as usize);
+    let callbacks_va = tls.address_of_callbacks;
+    if callbacks_va == 0 {
+        return Ok(());
+    }
+
+    //address_of_callbacks is an absolute VA in the 64-bit address space.
+    //Convert to a pointer into the mapped image using the load delta.
+    let delta = base as i64 - opt.image_base as i64;
+    let cb_ptr = (callbacks_va as i64 + delta) as *const u64;
+
+    let mut i = 0usize;
+    loop {
+        let cb_abs = std::ptr::read_unaligned(cb_ptr.add(i));
+        if cb_abs == 0 {
+            break;
+        }
+        //cb_abs is an absolute VA; apply the same delta to get the mapped address.
+        let cb_mapped = (cb_abs as i64 + delta) as *const ();
+        let callback: TlsCallback = std::mem::transmute(cb_mapped);
+        log_info(&format!("Invoking TLS callback[{}] at {:#X}", i, cb_mapped as usize));
+        callback(base as *mut std::ffi::c_void, DLL_PROCESS_ATTACH, std::ptr::null_mut());
+        i += 1;
+    }
+
+    Ok(())
 }
